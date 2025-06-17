@@ -2,6 +2,10 @@
 **/.env
 **/Search_terms.csv 
 
+# macOS system files
+.DS_Store
+**/.DS_Store
+
 # FAISS related files
 **/*.index
 **/*.faiss

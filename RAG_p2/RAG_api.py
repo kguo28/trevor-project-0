@@ -11,16 +11,17 @@ from sklearn.metrics import mean_squared_error
 from typing import List, Optional, Dict, Any
 from supabase import create_client
 import hashlib
+from serpapi import GoogleSearch
 
 load_dotenv()
 print("✅ ENV loaded:")
-print("SUPABASE_URL =", os.getenv("SUPABASE_URL"))
-print("SUPABASE_SERVICE_KEY =", "present" if os.getenv("SUPABASE_SERVICE_KEY") else "missing")
+print("SUPABASE_URL =", os.getenv("NEXT_PUBLIC_SUPABASE_URL"))
+print("SUPABASE_SERVICE_KEY =", "present" if os.getenv("NEXT_PUBLIC_SUPABASE_ANON_KEY") else "missing")
 
 
 
-supabase_url = os.getenv("SUPABASE_URL")
-supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
+supabase_url = os.getenv("NEXT_PUBLIC_SUPABASE_URL")
+supabase_key = os.getenv("NEXT_PUBLIC_SUPABASE_ANON_KEY")
 supabase = create_client(supabase_url, supabase_key)
 
 def hash_csv_content(csv_bytes: bytes) -> str:
@@ -178,14 +179,15 @@ non_evergreen_train_df = None
 # Function to load and split CSV data into evergreen and non-evergreen
 def load_and_split_data(file_path, test_size=0.001):
     print(f"Loading data from {file_path}...")
-    df = pd.read_csv(file_path)
+    # Read CSV with header
+    df = pd.read_csv(file_path, header=0)  # Use first row as header
     
     # Clean the data - remove rows with missing values in key columns
-    df = df.dropna(subset=['Unnamed: 6', 'Unnamed: 7', 'Unnamed: 8'])
+    df = df.dropna(subset=['Avg. CPM', 'Impr.', 'Interactions'])
     
-    # Split into evergreen and non-evergreen based on column 3 (index 3)
+    # Split into evergreen and non-evergreen based on Campaign column
     # Check if the string "[Evergreen]" appears in the column
-    evergreen_mask = df['Unnamed: 3'].str.contains('\[Evergreen\]', na=False)
+    evergreen_mask = df['Campaign'].str.contains('\[Evergreen\]', na=False)
     evergreen_df = df[evergreen_mask]
     non_evergreen_df = df[~evergreen_mask]
     
@@ -220,11 +222,9 @@ def create_documents_from_df(df, is_evergreen):
     category = "evergreen" if is_evergreen else "non_evergreen"
     
     for idx, row in df.iterrows():
-        # Extract search term from first column
-        search_term = row.iloc[0]
-        
-        # Extract match type (second column, index 1)
-        match_type = row['Unnamed: 1'] if pd.notna(row['Unnamed: 1']) else "Unknown Match Type"
+        # Extract search term and match type
+        search_term = row['Search term']
+        match_type = row['Match type'] if pd.notna(row['Match type']) else "Unknown Match Type"
         
         # Include match type in the content
         content = f"Search terms report: {search_term}\nMatch Type: {match_type}\nCategory: {category}\nRow: {idx}"
@@ -333,30 +333,26 @@ def extract_metrics_from_results(results, evergreen_train_df, non_evergreen_trai
             if 0 <= row_num < len(df_to_use):
                 row_data = df_to_use.iloc[row_num]
                 
-                # Extract the search term from the first column
-                if len(row_data) > 0:
-                    search_term = row_data.iloc[0]
+                # Extract the search term
+                if 'Search term' in row_data.index:
+                    search_term = row_data['Search term']
                 
-                # Extract match type (second column, index 1)
-                if 'Unnamed: 1' in row_data.index and pd.notna(row_data['Unnamed: 1']):
-                    match_type = row_data['Unnamed: 1']
+                # Extract match type
+                if 'Match type' in row_data.index and pd.notna(row_data['Match type']):
+                    match_type = row_data['Match type']
                 
-                # Map the unnamed columns to the correct metrics based on position
-                # Avg. CPM is typically in column 6 (index 6)
-                if 'Unnamed: 6' in row_data.index and pd.notna(row_data['Unnamed: 6']):
-                    avg_cpm = row_data['Unnamed: 6']
+                # Extract metrics using correct column names
+                if 'Avg. CPM' in row_data.index and pd.notna(row_data['Avg. CPM']):
+                    avg_cpm = row_data['Avg. CPM']
                 
-                # Impressions is typically in column 7 (index 7)
-                if 'Unnamed: 7' in row_data.index and pd.notna(row_data['Unnamed: 7']):
-                    impressions = row_data['Unnamed: 7']
+                if 'Impr.' in row_data.index and pd.notna(row_data['Impr.']):
+                    impressions = row_data['Impr.']
                 
-                # Interactions is typically in column 8 (index 8)
-                if 'Unnamed: 8' in row_data.index and pd.notna(row_data['Unnamed: 8']):
-                    interactions = row_data['Unnamed: 8']
+                if 'Interactions' in row_data.index and pd.notna(row_data['Interactions']):
+                    interactions = row_data['Interactions']
                 
-                # Conversions is typically in column 14 (index 14)
-                if 'Unnamed: 14' in row_data.index and pd.notna(row_data['Unnamed: 14']):
-                    conversions = row_data['Unnamed: 14']
+                if 'Conversions' in row_data.index and pd.notna(row_data['Conversions']):
+                    conversions = row_data['Conversions']
         
         # Add to formatted results for LLM
         formatted_results.append({
@@ -696,4 +692,121 @@ if __name__ == "__main__":
     import os
     port = int(os.environ.get("PORT", 10000))  # fallback to 10000 for local dev
     uvicorn.run(app, host="0.0.0.0", port=port)
+
+# Add these new models
+class SearchTermAnalysis(BaseModel):
+    search_term: str
+    has_interest: bool
+    growth_percentage: float
+    timeline_data: List[Dict[str, Any]]
+
+class SearchTermsAnalysisResponse(BaseModel):
+    top_terms: List[SearchTermAnalysis]
+    total_analyzed: int
+    total_with_interest: int
+
+def check_interest(keyword: str, api_key: str) -> bool:
+    """Return True if keyword has Google Trends interest, False otherwise."""
+    params = {
+        "engine": "google_trends",
+        "q": keyword,
+        "api_key": api_key
+    }
+
+    try:
+        search = GoogleSearch(params)
+        results = search.get_dict()
+        timeline_data = results.get("interest_over_time", {}).get("timeline_data", [])
+        return bool(timeline_data)
+    except Exception as e:
+        print(f"Error checking interest for {keyword}: {str(e)}")
+        return False
+
+def get_interest_data(keyword: str, api_key: str) -> Dict[str, Any]:
+    """Get interest data for a keyword."""
+    params = {
+        "engine": "google_trends",
+        "q": keyword,
+        "api_key": api_key
+    }
+
+    try:
+        search = GoogleSearch(params)
+        results = search.get_dict()
+        return results.get("interest_over_time", {})
+    except Exception as e:
+        print(f"Error getting interest data for {keyword}: {str(e)}")
+        return {}
+
+def calculate_growth_percentage(timeline_data: Dict[str, Any]) -> float:
+    """Calculate percent change from timeline data."""
+    if not timeline_data or "timeline_data" not in timeline_data:
+        return 0.0
+
+    timeline = timeline_data["timeline_data"]
+    if not timeline:
+        return 0.0
+
+    try:
+        first_value = timeline[0]['values'][0]['extracted_value']
+        last_value = timeline[-1]['values'][0]['extracted_value']
+
+        if first_value == 0:
+            return 0.0
+
+        return ((last_value - first_value) / first_value) * 100
+    except Exception as e:
+        print(f"Error calculating growth percentage: {str(e)}")
+        return 0.0
+
+@app.post("/analyze-search-terms", response_model=SearchTermsAnalysisResponse)
+async def analyze_search_terms(file: UploadFile = File(...)):
+    """Analyze search terms from a CSV file and return top trending terms."""
+    try:
+        # Read the CSV file
+        df = pd.read_csv(file.file)
+        
+        # Get API key from environment
+        api_key = os.getenv("SERPAI_KEY")
+        if not api_key:
+            raise HTTPException(status_code=500, detail="SERPAPI_KEY not found in environment variables")
+
+        # Initialize list to store analysis results
+        analysis_results = []
+        
+        # Process each search term
+        for _, row in df.iterrows():
+            search_term = row['Search term']
+            
+            # Check if term has interest
+            has_interest = check_interest(search_term, api_key)
+            
+            if has_interest:
+                # Get interest data
+                interest_data = get_interest_data(search_term, api_key)
+                
+                # Calculate growth percentage
+                growth_percentage = calculate_growth_percentage(interest_data)
+                
+                analysis_results.append(SearchTermAnalysis(
+                    search_term=search_term,
+                    has_interest=True,
+                    growth_percentage=growth_percentage,
+                    timeline_data=interest_data.get("timeline_data", [])
+                ))
+
+        # Sort by growth percentage and get top 10
+        sorted_results = sorted(analysis_results, key=lambda x: x.growth_percentage, reverse=True)
+        top_10 = sorted_results[:10]
+
+        return SearchTermsAnalysisResponse(
+            top_terms=top_10,
+            total_analyzed=len(df),
+            total_with_interest=len(analysis_results)
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        file.file.close()
 

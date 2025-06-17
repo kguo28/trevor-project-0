@@ -201,7 +201,7 @@ export default function Dashboard() {
     setError(null)
 
     try {
-      const response = await fetch("http://localhost:8000/predict", {
+      const response = await fetch("http://0.0.0.0:10000/predict", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
